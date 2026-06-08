@@ -1611,26 +1611,39 @@ def _bun_bin() -> str:
 
 
 def _make_opentui_argv(tui_dev: bool) -> tuple[list[str], Path]:
-    """Argv for the native OpenTUI engine: ``bun src/entry.real.tsx``.
+    """Argv for the native OpenTUI engine (Bun runs the TypeScript entry directly).
 
-    No build step — Bun runs the TypeScript entry directly. Returns the argv and
-    the ``ui-tui-opentui/`` cwd. ``tui_dev`` adds ``--watch`` for hot reload.
+    Prefers the v4 Solid + Effect-at-boundary engine
+    (``ui-tui-opentui-v2/src/entry/main.tsx``); falls back to the superseded React
+    build (``ui-tui-opentui/src/entry.real.tsx``) if the v2 package isn't present.
+    Returns the argv and the package cwd. ``tui_dev`` adds ``--watch`` for hot reload.
+
+    The spawned ``tui_gateway`` resolves its Python from this checkout
+    (``HERMES_PYTHON_SRC_ROOT`` env → ``<root>/.venv`` …); since the package lives at
+    ``<root>/ui-tui-opentui-v2`` the gateway's default source-root resolution lands on
+    ``PROJECT_ROOT`` without extra plumbing.
     """
-    app_dir = PROJECT_ROOT / "ui-tui-opentui"
-    entry = app_dir / "src" / "entry.real.tsx"
-    if not entry.is_file():
-        print(
-            f"OpenTUI engine entry not found at {entry}.\n"
-            f"Unset HERMES_TUI_ENGINE to use the default Ink engine.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    bun = _bun_bin()
-    args = [bun]
-    if tui_dev:
-        args.append("--watch")
-    args.append(str(entry))
-    return args, app_dir
+    candidates = (
+        (PROJECT_ROOT / "ui-tui-opentui-v2", Path("src") / "entry" / "main.tsx"),
+        (PROJECT_ROOT / "ui-tui-opentui", Path("src") / "entry.real.tsx"),
+    )
+    for app_dir, rel in candidates:
+        entry = app_dir / rel
+        if entry.is_file():
+            bun = _bun_bin()
+            args = [bun]
+            if tui_dev:
+                args.append("--watch")
+            args.append(str(entry))
+            return args, app_dir
+
+    tried = ", ".join(str(app_dir / rel) for app_dir, rel in candidates)
+    print(
+        f"OpenTUI engine entry not found (tried: {tried}).\n"
+        f"Unset HERMES_TUI_ENGINE to use the default Ink engine.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 
 def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
