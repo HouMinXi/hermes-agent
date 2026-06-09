@@ -110,6 +110,30 @@ describe('session store — ordered parts (Phase 2b)', () => {
     }
   })
 
+  test('captures tool args: context→argsPreview, args→argsText, duration, omitted note (item 2)', () => {
+    const store = createSessionStore()
+    store.apply({ type: 'message.start' })
+    store.apply({ type: 'tool.start', payload: { tool_id: 'a', name: 'terminal', context: 'ls -la src' } })
+    store.apply({
+      type: 'tool.complete',
+      payload: {
+        tool_id: 'a',
+        name: 'terminal',
+        args: { command: 'ls -la src' },
+        duration_s: 0.34,
+        result_text: '[showing verbose tail; omitted 3 lines / 90 chars]\nfile1\nfile2'
+      }
+    })
+    const tool = store.state.messages.at(-1)!.parts![0]!
+    if (tool.type !== 'tool') throw new Error('expected a tool part')
+    expect(tool.argsPreview).toBe('ls -la src') // primary-arg preview shown in the header (NOT overwritten)
+    expect(tool.argsText).toContain('"command"') // full args JSON for the expanded view
+    expect(tool.duration).toBe(0.34)
+    expect(tool.omittedNote).toBe('3 lines / 90 chars') // tidy note; raw label stripped
+    expect(tool.resultText).toBe('file1\nfile2') // clean body (label peeled)
+    expect(tool.lineCount).toBe(2)
+  })
+
   test('reasoning.delta accumulates into a reasoning part', () => {
     const store = createSessionStore()
     store.apply({ type: 'message.start' })

@@ -89,6 +89,38 @@ describe('App render (Phase 1, themed)', () => {
     expect(parts.some(p => p.type === 'text' && p.text === 'Listing files:')).toBe(true)
   })
 
+  test('a tool part shows its primary-arg preview + duration in the collapsed header (item 2)', async () => {
+    const store = createSessionStore()
+    store.apply({ type: 'gateway.ready' })
+    store.apply({ type: 'message.start' })
+    store.apply({ type: 'tool.start', payload: { tool_id: 't1', name: 'terminal', context: 'ls -la src' } })
+    store.apply({
+      type: 'tool.complete',
+      payload: {
+        tool_id: 't1',
+        name: 'terminal',
+        args: { command: 'ls -la src' },
+        duration_s: 0.3,
+        result_text: 'alpha.txt\nbeta.txt'
+      }
+    })
+    store.apply({ type: 'message.complete' })
+
+    const frame = await captureFrame(
+      () => (
+        <ThemeProvider theme={() => store.state.theme}>
+          <App store={store} />
+        </ThemeProvider>
+      ),
+      { until: 'ls -la src', width: 72, height: 16 }
+    )
+
+    expect(frame).toContain('terminal') // tool name
+    expect(frame).toContain('ls -la src') // primary-arg preview (item 2 — args now visible)
+    expect(frame).toContain('0.3s') // duration
+    expect(frame).toContain('(2 lines)') // output line count (collapsed)
+  })
+
   test('an approval prompt replaces the composer (blocked) and renders the options', async () => {
     const store = createSessionStore()
     store.apply({ type: 'gateway.ready' })

@@ -14,7 +14,7 @@
 import { createStore, produce } from 'solid-js/store'
 
 import type { GatewayEvent, GatewaySkinDecoded } from '../boundary/schema/GatewayEvent.ts'
-import { stripToolEnvelope } from './toolOutput.ts'
+import { stripOmittedNote, stripToolEnvelope } from './toolOutput.ts'
 import { DEFAULT_THEME, type Theme, themeFromSkin } from './theme.ts'
 
 /** A tool call inside an assistant turn (matched start↔complete by `id`=tool_id). */
@@ -29,6 +29,14 @@ export interface ToolPartState {
   summary?: string
   error?: string
   lineCount?: number
+  /** One-line primary-arg preview from gateway `context` (always sent; redaction-safe). */
+  argsPreview?: string
+  /** Full args (pretty JSON) for the expanded view — `args_text` (redacted) or stringified `args`. */
+  argsText?: string
+  /** Tool wall-clock seconds (gateway `duration_s`), shown dim in the header. */
+  duration?: number
+  /** Tidy note when the gateway truncated output (e.g. "5 lines / 234 chars"). */
+  omittedNote?: string
 }
 
 /** One ordered piece of an assistant turn (§7). */
@@ -484,10 +492,17 @@ export function createSessionStore() {
         const id = readStr(event.payload, 'tool_id')
         if (!id) break
         const name = readStr(event.payload, 'name') ?? 'tool'
+        // `context` = build_tool_preview's primary-arg line (always sent); `args_text`
+        // = redacted full-arg JSON (verbose mode only). Surfacing these is item 2.
+        const argsPreview = readStr(event.payload, 'context')
+        const argsText = readStr(event.payload, 'args_text')
         setState(
           produce(draft => {
             const live = ensureAssistant(draft)
-            ;(live.parts ??= []).push({ type: 'tool', id, name, state: 'running' })
+            const part: ToolPartState = { type: 'tool', id, name, state: 'running' }
+            if (argsPreview) part.argsPreview = argsPreview
+            if (argsText) part.argsText = argsText
+            ;(live.parts ??= []).push(part)
           })
         )
         break
@@ -498,8 +513,15 @@ export function createSessionStore() {
         const name = readStr(event.payload, 'name')
         const error = readStr(event.payload, 'error')
         const summary = readStr(event.payload, 'summary')
-        const resultText = stripToolEnvelope(readStr(event.payload, 'result_text') ?? summary ?? '')
+        // Peel the gateway's "[showing verbose tail; omitted …]" label (item 2) before
+        // envelope-stripping, so the body is clean and the note renders tidily.
+        const { body: rawBody, omittedNote } = stripOmittedNote(readStr(event.payload, 'result_text') ?? summary ?? '')
+        const resultText = stripToolEnvelope(rawBody)
         const lineCount = resultText ? resultText.replace(/\s+$/, '').split('\n').length : 0
+        // `args` (full dict) is always sent; stringify as the expanded-view args
+        // when verbose `args_text` wasn't captured on start. `duration_s` → header.
+        const argsObj = event.payload['args']
+        const duration = readOptNum(event.payload, 'duration_s')
         setState(
           produce(draft => {
             let part = findToolPart(draft, id)
@@ -514,6 +536,16 @@ export function createSessionStore() {
             if (resultText) part.resultText = resultText
             if (summary) part.summary = summary
             if (error) part.error = error
+            if (duration !== undefined) part.duration = duration
+            if (omittedNote) part.omittedNote = omittedNote
+            // argsPreview (from tool.start `context`) is intentionally NOT overwritten.
+            if (!part.argsText && argsObj && typeof argsObj === 'object') {
+              try {
+                part.argsText = JSON.stringify(argsObj, null, 2)
+              } catch {
+                /* unstringifiable args — leave unset */
+              }
+            }
           })
         )
         break

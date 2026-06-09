@@ -40,9 +40,27 @@ export function normalizeOutput(text: string): string {
  * object, return its `output` (plus a compact error/exit suffix when the command
  * failed); otherwise return `raw` unchanged. (Gotcha §8 — strip the envelope.)
  */
+/**
+ * When the gateway tail-caps a LARGE result it serialises the whole
+ * `{"output": "...", "exit_code": 0, "error": null}` envelope first, so the
+ * surviving tail ends mid-string with the envelope close (`…", "exit_code": 0,
+ * "error": null}`) — and, if the head survived, opens with `{"output": "`. The
+ * fragment can't be JSON.parsed, so peel those affixes off conservatively (only
+ * the exact gateway shape; real output won't end this way). Item 2 polish.
+ */
+const ENVELOPE_HEAD = /^\s*\{\s*"output"\s*:\s*"/
+const ENVELOPE_TAIL = /"\s*,\s*"exit_code"\s*:\s*-?\d+(?:\s*,\s*"error"\s*:\s*(?:null|"(?:[^"\\]|\\.)*"))?\s*\}\s*$/
+
+function unwrapEnvelopeFragment(s: string): string {
+  const tail = ENVELOPE_TAIL.test(s)
+  const head = ENVELOPE_HEAD.test(s)
+  if (!tail && !head) return s
+  return s.replace(ENVELOPE_HEAD, '').replace(ENVELOPE_TAIL, '')
+}
+
 export function stripToolEnvelope(raw: string): string {
   const s = (raw ?? '').trim()
-  if (!s.startsWith('{')) return normalizeOutput(raw ?? '')
+  if (!s.startsWith('{')) return normalizeOutput(unwrapEnvelopeFragment(raw ?? ''))
 
   try {
     const parsed: unknown = JSON.parse(s)
@@ -56,9 +74,24 @@ export function stripToolEnvelope(raw: string): string {
       return normalizeOutput(out)
     }
   } catch {
-    // not JSON — fall through and return raw
+    // not parseable as a whole — maybe a tail-capped envelope fragment
   }
-  return normalizeOutput(raw ?? '')
+  return normalizeOutput(unwrapEnvelopeFragment(raw ?? ''))
+}
+
+/**
+ * The gateway caps verbose tool output to a tail and PREFIXES a literal label
+ * (`tui_gateway/server.py:_cap_tui_verbose_text`):
+ *   `[showing verbose tail; omitted 5 lines / 234 chars]\n<tail>`
+ *   `[showing verbose tail; omitted 512 chars]\n<tail>`
+ * The raw label is neither useful nor pretty (item 2). Strip it off and hand the
+ * view a tidy `omittedNote` ("5 lines / 234 chars") to render as a dim affordance.
+ */
+export function stripOmittedNote(text: string): { body: string; omittedNote?: string } {
+  const s = (text ?? '').replace(/^\s+/, '')
+  const match = s.match(/^\[showing verbose tail; omitted (.+?)\]\n/)
+  if (!match) return { body: text ?? '' }
+  return { body: s.slice(match[0].length), omittedNote: match[1] ?? '' }
 }
 
 /**
