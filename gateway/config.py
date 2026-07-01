@@ -629,6 +629,12 @@ class GatewayConfig:
     # fresh session exactly as if the reset policy had fired.  0 = disabled.
     session_store_max_age_days: int = 90
 
+    # External dispatcher: forward certain slash commands to a Unix socket
+    # service instead of handling them in the gateway. Disabled when
+    # dispatcher_socket is empty or dispatcher_commands is empty.
+    dispatcher_socket: Optional[str] = None
+    dispatcher_commands: List[str] = field(default_factory=list)
+
     def get_connected_platforms(self) -> List[Platform]:
         """Return list of platforms that are enabled and configured."""
         connected = []
@@ -822,6 +828,8 @@ class GatewayConfig:
             unauthorized_dm_behavior=unauthorized_dm_behavior,
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),
             session_store_max_age_days=session_store_max_age_days,
+            dispatcher_socket=data.get("dispatcher_socket"),
+            dispatcher_commands=data.get("dispatcher_commands") or [],
         )
 
     def get_unauthorized_dm_behavior(self, platform: Optional[Platform] = None) -> str:
@@ -937,6 +945,35 @@ def load_gateway_config() -> GatewayConfig:
 
             if "max_concurrent_sessions" in yaml_cfg:
                 gw_data["max_concurrent_sessions"] = yaml_cfg["max_concurrent_sessions"]
+
+            # External dispatcher: forward slash commands to a Unix socket.
+            dispatcher_cfg = yaml_cfg.get("dispatcher")
+            if dispatcher_cfg is not None and not isinstance(dispatcher_cfg, dict):
+                logger.warning(
+                    "Ignoring dispatcher config in config.yaml: "
+                    "expected mapping, got %s",
+                    type(dispatcher_cfg).__name__,
+                )
+            if isinstance(dispatcher_cfg, dict):
+                ds = dispatcher_cfg.get("socket")
+                if ds and isinstance(ds, str):
+                    gw_data["dispatcher_socket"] = ds
+                dc = dispatcher_cfg.get("commands")
+                if isinstance(dc, list):
+                    valid = [
+                        c.strip() for c in dc
+                        if isinstance(c, str) and c.strip()
+                    ]
+                    if len(valid) < len(dc):
+                        logger.warning(
+                            "Ignoring %d non-string or empty "
+                            "dispatcher_commands entries in config.yaml "
+                            "(%d valid of %d total)",
+                            len(dc) - len(valid),
+                            len(valid),
+                            len(dc),
+                        )
+                    gw_data["dispatcher_commands"] = valid
 
             streaming_cfg = yaml_cfg.get("streaming")
             if not isinstance(streaming_cfg, dict):
@@ -2150,6 +2187,16 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     if relay_url_val:
         relay_config = _enable_from_env(Platform.RELAY)
         relay_config.extra["relay_url"] = relay_url_val.rstrip("/")
+
+    # External dispatcher env overrides
+    dispatcher_socket_env = os.getenv("DISPATCHER_SOCKET_PATH", "").strip()
+    if dispatcher_socket_env:
+        config.dispatcher_socket = dispatcher_socket_env
+    dispatcher_commands_env = os.getenv("DISPATCHER_FORWARD_COMMANDS", "").strip()
+    if dispatcher_commands_env:
+        config.dispatcher_commands = [
+            c.strip() for c in dispatcher_commands_env.split(",") if c.strip()
+        ]
 
     for platform_config in config.platforms.values():
         platform_config.extra.pop("_enabled_explicit", None)

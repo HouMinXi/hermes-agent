@@ -1678,6 +1678,16 @@ from gateway.session import (
     is_shared_multi_user_session,
 )
 from gateway.delivery import DeliveryRouter, looks_like_telegram_private_chat_id
+from gateway.dispatcher_client import (
+    DispatcherClient,
+    DispatcherConnectionError,
+)
+from gateway.dispatcher_protocol import (
+    Envelope as _DispatcherEnvelope,
+    OP_DISPATCH,
+    STATUS_OK,
+    make_request as _make_dispatcher_request,
+)
 from gateway.authz_mixin import GatewayAuthorizationMixin
 from gateway.kanban_watchers import GatewayKanbanWatchersMixin
 from gateway.slash_commands import GatewaySlashCommandsMixin
@@ -2787,6 +2797,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Set on gateway stop so the recreate-on-shutdown path can't resurrect
         # the pool during a real shutdown.
         self._executor_closing = False
+        # External dispatcher: forward configured commands to a Unix
+        # socket service. Disabled when the command set is empty.
+        self._dispatcher_commands: frozenset = frozenset(
+            self.config.dispatcher_commands or []
+        )
+        # Eager init when configured; None when disabled.
+        self._dispatcher_client: Optional[DispatcherClient] = (
+            DispatcherClient(socket_path=self.config.dispatcher_socket)
+            if self._dispatcher_commands
+            else None
+        )
+
         # Track running agents per session for interrupt support
         # Key: session_key, Value: AIAgent instance
         self._running_agents: Dict[str, Any] = {}
@@ -8055,6 +8077,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _phase_elapsed(),
             )
 
+            # Close the dispatcher Unix-socket client if it was lazily
+            # initialised during this run.  Without this, every gateway
+            # restart cycle leaves the previous gateway's open AF_UNIX
+            # fd behind until Python garbage-collects DispatcherClient.
+            _disp_client = getattr(self, "_dispatcher_client", None)
+            if _disp_client is not None:
+                try:
+                    await asyncio.wait_for(
+                        _disp_client.close(), timeout=3.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "dispatcher client close timed out after 3s"
+                    )
+                except Exception as _e:
+                    logger.warning("dispatcher client close error: %s", _e)
+
             from gateway.status import remove_pid_file, release_gateway_runtime_lock
             remove_pid_file()
             release_gateway_runtime_lock()
@@ -9655,6 +9694,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         if self._draining:
             return f"⏳ Gateway is {self._status_action_gerund()} and is not accepting new work right now."
+
+        # Dispatcher-forwarded slash commands. These are commands an
+        # external dispatcher service handles; the gateway forwards
+        # them via Unix socket. On dispatcher failure we fall through
+        # to normal message handling rather than blocking the user.
+        _disp_cmds = getattr(self, "_dispatcher_commands", frozenset())
+        if command and _disp_cmds and command in _disp_cmds:
+            result = await self._forward_to_dispatcher(event, command)
+            if result is not None:
+                return result
 
         # User-defined quick commands (bypass agent loop, no LLM call)
         if command:
@@ -11853,6 +11902,86 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
 
 
+
+    # ── Dispatcher forwarding ──────────────────────────────────
+
+    async def _forward_to_dispatcher(
+        self, event: "MessageEvent", command: str
+    ) -> Optional[str]:
+        """Forward a slash command to the external dispatcher via
+        Unix socket. Returns formatted text on success, None on
+        failure (so the caller can fall through to normal handling).
+        """
+        client = getattr(self, "_dispatcher_client", None)
+        if client is None:
+            return None
+        source = event.source
+        platform_name = (
+            source.platform.value if source.platform else ""
+        )
+        args = event.get_command_args().strip()
+        content = f"/{command}"
+        if args:
+            content = f"{content} {args}"
+        payload = {"source": platform_name, "content": content}
+        try:
+            req = _make_dispatcher_request(OP_DISPATCH, payload)
+            resp = await asyncio.wait_for(
+                client.dispatch(req), timeout=10.0
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "dispatcher forward for /%s timed out after 10s",
+                command,
+            )
+            return None
+        except (DispatcherConnectionError, ValueError) as e:
+            logger.warning(
+                "dispatcher forward for /%s failed (non-fatal): %s",
+                command,
+                e,
+            )
+            return None
+        return self._format_dispatcher_response(command, resp)
+
+    @staticmethod
+    def _format_dispatcher_response(
+        command: str, resp: _DispatcherEnvelope,
+    ) -> str:
+        """Render a dispatcher Envelope as chat text."""
+        status = resp.status
+        payload = resp.payload or {}
+        if status == STATUS_OK:
+            kind = payload.get("result", "")
+            if kind == "echo":
+                echoed = payload.get("echoed_payload", {})
+                content = echoed.get("content", "")
+                return f"[dispatcher] echo: {content}"
+            if kind == "health":
+                return "[dispatcher] dispatcher reports healthy"
+            if kind == "help":
+                cmds = payload.get("commands", [])
+                lines = "\n".join(f"  /{c}" for c in cmds)
+                return f"[dispatcher] available commands:\n{lines}"
+            if kind == "status":
+                raw_up = payload.get("uptime_s", 0)
+                try:
+                    up = float(raw_up)
+                except (TypeError, ValueError):
+                    up = 0.0
+                handlers = payload.get("handlers", [])
+                return (
+                    f"[dispatcher] alive (uptime {up:.1f}s, "
+                    f"{len(handlers)} handlers)"
+                )
+            import json as _json
+            return (
+                "[dispatcher] "
+                + _json.dumps(payload, ensure_ascii=False, indent=2)
+            )
+        # Non-OK status
+        errmsg = payload.get("error", f"status {status}")
+        return f"[dispatcher] /{command} failed: {errmsg}"
 
     def _check_slash_access(
         self, source: SessionSource, canonical_cmd: str
