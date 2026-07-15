@@ -74,6 +74,8 @@ class DispatcherClient:
         timeout_s: float = DEFAULT_DISPATCHER_TIMEOUT_S,
         max_retries: int = DEFAULT_MAX_RETRIES,
     ) -> None:
+        # Empty-string env var ("DISPATCHER_SOCKET_PATH=") is falsy,
+        # so it falls through to the default path -- same as unset.
         self._path = (
             socket_path
             or os.environ.get("DISPATCHER_SOCKET_PATH")
@@ -113,7 +115,7 @@ class DispatcherClient:
             return
         try:
             self._reader, self._writer = await asyncio.open_unix_connection(
-                self._path
+                self._path, limit=self._MAX_LINE_BYTES
             )
             _LOG.debug("dispatcher client connected to %s", self._path)
         except (OSError, ConnectionError) as e:
@@ -245,6 +247,9 @@ class DispatcherClient:
                 f"dispatcher closed before sending response: {e}"
             ) from e
         except asyncio.LimitOverrunError:
+            # Connection state is corrupted -- close it so next call
+            # reconnects instead of reading leftover bytes.
+            await self._drop_connection()
             raise DispatcherConnectionError(
                 "dispatcher response exceeded line buffer limit"
             )

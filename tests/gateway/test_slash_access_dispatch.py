@@ -621,3 +621,33 @@ async def test_gating_isolated_per_platform():
     tg_src = _make_source(platform=Platform.TELEGRAM, user_id="999", chat_id="t1")
     result = await runner._handle_message(_make_event("/whoami", tg_src))
     assert "Tier: unrestricted" in result
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed on access check exception
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_access_check_exception_denies_command():
+    """When _check_slash_access raises, the dispatcher command must be denied
+    (fail-closed), not silently forwarded."""
+    runner = _make_runner(
+        platform_extra={
+            "allow_admin_from": ["111"],
+            "user_allowed_commands": [],
+        }
+    )
+    runner._dispatcher_commands = frozenset({"mycmd"})
+
+    def _boom(*_a, **_kw):
+        raise RuntimeError("access check exploded")
+
+    runner._check_slash_access = _boom
+    runner._forward_to_dispatcher = AsyncMock(return_value="should-not-reach")
+    result = await runner._handle_message(
+        _make_event("/mycmd", _make_source(user_id="999"))
+    )
+    assert result is not None
+    assert "access check error: command denied for safety" in result
+    assert "should-not-reach" not in (result or "")

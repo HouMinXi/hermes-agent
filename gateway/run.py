@@ -9702,7 +9702,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _disp_cmds = getattr(self, "_dispatcher_commands", frozenset())
         if command and _disp_cmds and command in _disp_cmds:
             # Gate: check access before forwarding to dispatcher
-            _denied = self._check_slash_access(source, command)
+            try:
+                _denied = self._check_slash_access(source, command)
+            except Exception as e:
+                logger.warning(
+                    "dispatcher command access check failed: %s", e
+                )
+                _denied = "access check error: command denied for safety"
             if _denied is not None:
                 return _denied
             result = await self._forward_to_dispatcher(event, command)
