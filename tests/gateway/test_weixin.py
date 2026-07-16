@@ -514,3 +514,28 @@ class TestWeixinPollStaleDetection:
             pass
         sleep_calls = [a.args[0] for a in sleep_mock.await_args_list]
         assert 600 in sleep_calls, f"Expected 600s sleep, got {sleep_mock.await_args_list}"
+
+    @patch("gateway.platforms.weixin._save_sync_buf")
+    @patch("gateway.platforms.weixin.asyncio.sleep", new_callable=AsyncMock)
+    @patch("gateway.platforms.weixin._get_updates", new_callable=AsyncMock)
+    def test_poll_stale_clears_sync_buffer(self, get_updates_mock, sleep_mock, save_mock):
+        """Stale detection clears sync buffer before retrying."""
+        from gateway.platforms.weixin import STALE_SESSION_RET
+
+        call_count = {"n": 0}
+        async def side_effect(*a, **kw):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return {"ret": STALE_SESSION_RET, "errmsg": "unknown error"}
+            raise asyncio.CancelledError()
+
+        get_updates_mock.side_effect = side_effect
+        adapter = self._connected_adapter()
+        try:
+            asyncio.run(adapter._poll_loop())
+        except (asyncio.CancelledError, RuntimeError):
+            pass
+        save_mock.assert_called()
+        # Verify empty buffer was saved
+        args = save_mock.call_args
+        assert args[0][2] == "" or args[1].get("sync_buf") == "" or args[0][-1] == "", f"Expected empty sync_buf, got {args}"

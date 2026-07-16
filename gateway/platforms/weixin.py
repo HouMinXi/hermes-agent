@@ -1375,7 +1375,9 @@ class WeixinAdapter(BasePlatformAdapter):
                 if ret not in {0, None} or errcode not in {0, None}:
                     if (ret == SESSION_EXPIRED_ERRCODE or errcode == SESSION_EXPIRED_ERRCODE
                             or _is_stale_session_ret(ret, errcode, response.get("errmsg"))):
-                        logger.error("[%s] Session expired (ret=%s errcode=%s); pausing for 10 minutes", self.name, ret, errcode)
+                        logger.error("[%s] Session expired (ret=%s errcode=%s); clearing sync buffer and pausing for 10 minutes", self.name, ret, errcode)
+                        sync_buf = ""
+                        _save_sync_buf(self._hermes_home, self._account_id, sync_buf)
                         if ALERT_SCRIPT:
                             _fire_alert("stale_session", f"ret={ret} errcode={errcode}")
                         await asyncio.sleep(600)
