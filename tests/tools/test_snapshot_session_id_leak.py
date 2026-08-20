@@ -50,6 +50,8 @@ def test_export_snippet_shape():
     assert "${!HERMES_SESSION_*}" in snippet
     assert "${!HERMES_CRON_AUTO_DELIVER_*}" in snippet
     assert "HERMES_UI_SESSION_ID" in snippet
+    assert "HERMES_CRON_SESSION" in snippet
+    assert "HERMES_DELEGATED_CHILD_CONTEXT" in snippet
     assert "grep -vE" not in snippet
     assert '"$__hermes_snap_tmp"' in snippet
     # The redirection must be attached to a brace group wrapping the dump,
