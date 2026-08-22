@@ -281,3 +281,134 @@ def test_gate_treats_an_empty_file_as_missing(tmp_path):
 
     assert rejection is not None
     assert "reports/r1.md" in rejection
+
+
+def test_bold_note_inside_deliverables_does_not_terminate_section():
+    """P2-2: Bold text like **Note:** inside deliverables does not end the section."""
+    from hermes_cli.kanban_db import _declared_artifact_paths
+
+    body = """
+## Deliverables
+- reports/r1.md
+**Note:** This is an important note
+- reports/r2.md
+"""
+    assert _declared_artifact_paths(body) == ["reports/r1.md", "reports/r2.md"]
+
+
+def test_placeholder_regex_does_not_flag_valid_filenames_with_n():
+    """P2-3: Names like N-report.md or r1-N.md are valid files, not template placeholders."""
+    from hermes_cli.kanban_db import _declared_artifact_paths
+
+    body = """
+## Deliverables
+- reports/N-report.md
+- reports/r1-N.md
+"""
+    assert _declared_artifact_paths(body) == [
+        "reports/N-report.md",
+        "reports/r1-N.md",
+    ]
+
+
+def test_gate_rejects_path_traversal(tmp_path):
+    """P2-4: A relative path traversing outside the workspace root is rejected."""
+    from hermes_cli.kanban_db import _missing_artifact_rejection
+
+    outside_file = tmp_path / "outside.md"
+    outside_file.write_text("secret", encoding="utf-8")
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+
+    task = _make_task(ws, "## Deliverables\n- ../outside.md\n")
+    rejection = _missing_artifact_rejection(task)
+
+    assert rejection is not None
+    assert "../outside.md" in rejection
+
+
+def test_section_fallthrough_preserves_later_paths_after_non_path_line():
+    """P2-5: Non-path lines (plain notes) inside deliverables do not discard later items."""
+    from hermes_cli.kanban_db import _declared_artifact_paths
+
+    body = """
+## Deliverables
+- reports/r1.md
+some note without bold or heading
+- reports/r2.md
+"""
+    assert _declared_artifact_paths(body) == ["reports/r1.md", "reports/r2.md"]
+
+
+def test_rejection_message_does_not_leak_workspace_path(tmp_path):
+    """P3-8: The error message lists missing files without leaking the full workspace root."""
+    from hermes_cli.kanban_db import _missing_artifact_rejection
+
+    ws = tmp_path / "secret_workspace_dir"
+    task = _make_task(ws, "## Deliverables\n- reports/r1.md\n")
+    rejection = _missing_artifact_rejection(task)
+
+    assert rejection is not None
+    assert "reports/r1.md" in rejection
+    assert "secret_workspace_dir" not in rejection
+    assert str(ws) not in rejection
+
+
+def test_cmd_complete_artifact_gate_integration(kanban_home, tmp_path):
+    """P3-9: Full CLI path: card with deliverables fails completion when absent, succeeds when present."""
+    import argparse
+    from hermes_cli import kanban as kc
+    from hermes_cli import kanban_db as kb
+
+    ws = tmp_path / "task_workspace"
+    ws.mkdir()
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="Produce report",
+            body="## Deliverables\n- final_report.md\n",
+            workspace_kind="dir",
+            workspace_path=str(ws),
+        )
+
+    # 1. File absent -> complete exits nonzero with rejection
+    args = argparse.Namespace(task_ids=[tid], summary="Done", result=None, metadata=None)
+    rc = kc._cmd_complete(args)
+    assert rc != 0
+
+    with kb.connect_closing() as conn:
+        task = kb.get_task(conn, tid)
+        assert task.status != "done"
+
+    # 2. Touch the file -> complete succeeds
+    report_file = ws / "final_report.md"
+    report_file.write_text("Report content", encoding="utf-8")
+
+    rc = kc._cmd_complete(args)
+    assert rc == 0
+
+    with kb.connect_closing() as conn:
+        task = kb.get_task(conn, tid)
+        assert task.status == "done"
+
+
+def test_bold_deliverable_keyword_phrase_does_not_terminate_section():
+    """P3-A: Bold phrases that merely start with a deliverable keyword must not
+    terminate the section. Only an actual bold heading does.
+
+    `**Deliverable text** is still being refined` is prose, not a heading --
+    treating it as the section boundary drops every path after it.
+    """
+    from hermes_cli.kanban_db import _declared_artifact_paths
+
+    body = """
+## Deliverables
+- reports/r1.md
+**Deliverable text** is still being refined
+- reports/r2.md
+"""
+    assert _declared_artifact_paths(body) == ["reports/r1.md", "reports/r2.md"]
+
+

@@ -12145,7 +12145,14 @@ _ARTIFACT_HEADING_RE = re.compile(
     r"\s*[:：]?\s*\*{0,2}\s*$",
     re.IGNORECASE,
 )
-_NEXT_HEADING_RE = re.compile(r"^\s*(?:#{1,6}\s|\*\*\S)")
+_NEXT_HEADING_RE = re.compile(
+    r"^\s*(?:#{1,6}\s|\*\*(?:deliverables?|output\s+files?|artifacts?|交付物|产出物|输出文件)"
+    r"\s*[:：]?\s*\*{0,2}\s*$)",
+    re.IGNORECASE,
+)
+# Extension length cap {1,8} on both _ARTIFACT_PATH_RE and _PROSE_ARTIFACT_RE:
+# bounded backtracking + fits real extensions (.json, .markdown); exotic longer
+# ones still work via prose declarations.
 _ARTIFACT_PATH_RE = re.compile(
     r"^\s*[-*+]?\s*`?([^\s`,;()]+\.[A-Za-z0-9_]{1,8})`?\s*$"
 )
@@ -12166,7 +12173,7 @@ _PROSE_ARTIFACT_RE = re.compile(
 # a card that says "write r<N>.md for each round" declares nothing this
 # can verify, which is why dispatch should enumerate the rounds instead
 # of templating them.
-_PLACEHOLDER_RE = re.compile(r"[<>{}*?]|\$\{|%s|\bN\b")
+_PLACEHOLDER_RE = re.compile(r"[<>{}*?]|\$\{|%s")
 
 
 def _declared_artifact_paths(body: Optional[str]) -> list[str]:
@@ -12201,11 +12208,8 @@ def _declared_artifact_paths(body: Optional[str]) -> list[str]:
             if match:
                 paths.append(match.group(1))
                 continue
-            if line.strip():
-                # A non-path line inside the section: the bullet list has
-                # ended even though no new heading started. Fall through
-                # so this line is read as prose.
-                in_section = False
+            # A non-path line inside the section: do not terminate the section,
+            # but fall through so this line is also checked for prose declarations.
         for match in _PROSE_ARTIFACT_RE.finditer(line):
             paths.append(match.group(1))
 
@@ -12242,11 +12246,24 @@ def _missing_artifact_rejection(task: Optional[Task]) -> Optional[str]:
         # guessing at a location rather than verifying one.
         return None
 
+    # Known limitation: file existence check has a TOCTOU race (file could be
+    # modified or deleted between check and completion). The gate is best-effort
+    # evidence at completion time, not a synchronization primitive.
+    resolved_root = Path(root).resolve()
     missing: list[str] = []
     for rel in declared:
         candidate = Path(rel)
         if not candidate.is_absolute():
-            candidate = Path(root) / rel
+            resolved = (Path(root) / rel).resolve()
+            try:
+                if not resolved.is_relative_to(resolved_root):
+                    missing.append(rel)
+                    continue
+            except AttributeError:
+                if not str(resolved).startswith(str(resolved_root)):
+                    missing.append(rel)
+                    continue
+            candidate = resolved
         try:
             if not candidate.is_file() or candidate.stat().st_size == 0:
                 missing.append(rel)
@@ -12254,8 +12271,4 @@ def _missing_artifact_rejection(task: Optional[Task]) -> Optional[str]:
             missing.append(rel)
     if not missing:
         return None
-    return (
-        "declared deliverables are missing or empty: "
-        + ", ".join(missing)
-        + f" (resolved against {root})"
-    )
+    return "declared deliverables are missing or empty: " + ", ".join(missing)
